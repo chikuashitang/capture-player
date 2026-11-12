@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework Condition="'$(PortableBuild)' != 'true'">net10.0-windows</TargetFramework>
+    <TargetFramework Condition="'$(PortableBuild)' == 'true'">net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>CapturePlayer</AssemblyName>
+    <Product>采集卡播放器</Product>
+    <Description>用于 VC-002Pro 的 HDMI 画面和声音预览</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Update="resources\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,8 @@
+* text=auto
+*.cs text
+*.cl text
+*.cpp text
+*.glsl text
+*.md text
+# Preserve whitespace in the unmodified third-party shader.
+resources/super-resolution/*.glsl whitespace=-blank-at-eol
