@@ -9,13 +9,19 @@
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_params.h>
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <immintrin.h>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <thread>
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
@@ -347,6 +353,124 @@ struct Neural {
     }
 };
 
+// Keep the original frame flowing. Only the latest model request and result
+// are retained; the filter thread never waits on a GPU fence.
+class AsyncNeural {
+    using Clock = std::chrono::steady_clock;
+    struct Result {
+        Clock::time_point sourceTime;
+        std::vector<std::uint32_t> before, after;
+    };
+    Neural model;
+    std::mutex gate;
+    std::condition_variable ready;
+    std::thread worker;
+    std::vector<std::uint32_t> pending;
+    std::shared_ptr<const Result> latest;
+    Clock::time_point pendingTime;
+    bool waiting{}, stopping{}, applied{};
+
+    void process() {
+        std::vector<std::uint32_t> input(pending.size());
+        bool reset = true;
+        while (true) {
+            Clock::time_point time;
+            {
+                std::unique_lock lock(gate);
+                ready.wait(lock, [&] { return stopping || waiting; });
+                if (stopping) return;
+                input.swap(pending);
+                time = pendingTime;
+                waiting = false;
+            }
+            auto result = std::make_shared<Result>();
+            result->sourceTime = time;
+            result->after.resize(input.size());
+            model.run(input.data(), result->after.data(), reset);
+            reset = false;
+            result->before = input;
+            {
+                std::lock_guard lock(gate);
+                latest = std::move(result);
+            }
+        }
+    }
+
+public:
+    void init(unsigned w, unsigned h) {
+        model.init(w, h);
+        pending.resize(static_cast<size_t>(w) * h);
+        worker = std::thread([this] {
+            try { process(); }
+            catch (const std::exception& e) {
+                std::fprintf(stderr, "[CaptureNR] inference failed: %s\n", e.what());
+                std::fflush(stderr);
+                ExitProcess(31);
+            }
+        });
+    }
+
+    ~AsyncNeural() {
+        if (!worker.joinable()) return;
+        {
+            std::lock_guard lock(gate);
+            stopping = true;
+        }
+        ready.notify_one();
+        worker.join();
+    }
+
+    void update(const std::uint32_t* input, std::uint32_t* output) {
+        const auto now = Clock::now();
+        std::shared_ptr<const Result> result;
+        size_t count;
+        {
+            std::lock_guard lock(gate);
+            count = pending.size();
+            std::memcpy(pending.data(), input, count * sizeof(*input));
+            pendingTime = now;
+            waiting = true;
+            result = latest;
+        }
+        ready.notify_one();
+
+        // A result from before a cut or from a stalled worker must never
+        // recolor the current scene. Even when reusing a fresh result we only
+        // reuse the color delta, never an old frame.
+        if (result && now - result->sourceTime <= std::chrono::milliseconds(65)) {
+            unsigned change = 0;
+            for (size_t s = 0; s < 96; ++s) {
+                const size_t i = (s * 7433) % count;
+                for (unsigned shift : {0u, 8u, 16u}) {
+                    const int a = (input[i] >> shift) & 255;
+                    const int b = (result->before[i] >> shift) & 255;
+                    change += static_cast<unsigned>(a > b ? a - b : b - a);
+                }
+            }
+            if (change < 96 * 3 * 24) {
+                const auto zero = _mm_setzero_si128();
+                auto blend = [&](auto a, auto b, auto c) {
+                    return _mm_packus_epi16(
+                        _mm_add_epi16(_mm_unpacklo_epi8(a, zero), _mm_sub_epi16(_mm_unpacklo_epi8(c, zero), _mm_unpacklo_epi8(b, zero))),
+                        _mm_add_epi16(_mm_unpackhi_epi8(a, zero), _mm_sub_epi16(_mm_unpackhi_epi8(c, zero), _mm_unpackhi_epi8(b, zero))));
+                };
+                size_t i = 0;
+                for (; i + 4 <= count; i += 4) {
+                    auto load = [i](const std::uint32_t* p) { return _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i)); };
+                    _mm_storeu_si128(reinterpret_cast<__m128i*>(output + i), blend(load(input), load(result->before.data()), load(result->after.data())));
+                }
+                if (i < count) std::memcpy(output + i, input + i, (count - i) * sizeof(*input));
+                if (!applied) {
+                    applied = true;
+                    std::fprintf(stderr, "[CaptureNR] Async result applied to live frame\n");
+                }
+                return;
+            }
+        }
+        std::memcpy(output, input, count * sizeof(*input));
+    }
+};
+
 bool instance{};
 struct FreiInfo {
     const char* name; const char* author; int type; int color;
@@ -369,7 +493,7 @@ __declspec(dllexport) void f0r_set_param_value(void*, void*, int) {}
 __declspec(dllexport) void f0r_get_param_value(void*, void*, int) {}
 __declspec(dllexport) void* f0r_construct(unsigned w, unsigned h) {
     if (instance) return nullptr;
-    auto model = std::make_unique<Neural>();
+    auto model = std::make_unique<AsyncNeural>();
     try { model->init(w, h); }
     catch (const std::exception& e) {
         std::fprintf(stderr, "[CaptureNR] initialization failed: %s\n", e.what());
@@ -378,16 +502,8 @@ __declspec(dllexport) void* f0r_construct(unsigned w, unsigned h) {
     instance = true;
     return model.release();
 }
-__declspec(dllexport) void f0r_destruct(void* p) { delete static_cast<Neural*>(p); instance = false; }
-__declspec(dllexport) void f0r_update(void* p, double time, const std::uint32_t* in, std::uint32_t* out) {
-    auto model = static_cast<Neural*>(p);
-    try { model->run(in, out, time < 0.02); }
-    catch (const std::exception& e) {
-        std::fprintf(stderr, "[CaptureNR] inference failed: %s\n", e.what());
-        std::fflush(stderr);
-        // Frei0r cannot return an error. End this capture worker so the app
-        // visibly recovers to the original stream instead of faking NR.
-        ExitProcess(31);
-    }
+__declspec(dllexport) void f0r_destruct(void* p) { delete static_cast<AsyncNeural*>(p); instance = false; }
+__declspec(dllexport) void f0r_update(void* p, double, const std::uint32_t* in, std::uint32_t* out) {
+    static_cast<AsyncNeural*>(p)->update(in, out);
 }
 }

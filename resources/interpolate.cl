@@ -1,5 +1,6 @@
-// Estimate local motion on 16-pixel tiles, then warp both adjacent frames.
+// Estimate local motion on 32-pixel tiles, then warp both adjacent frames.
 // Estimate once per source frame, then render each fractional phase.
+#define FLOW_TILE 32
 constant sampler_t point = CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP_TO_EDGE | CLK_FILTER_NEAREST;
 constant sampler_t linear = CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP_TO_EDGE | CLK_FILTER_LINEAR;
 
@@ -7,15 +8,15 @@ float match(read_only image2d_t prev, read_only image2d_t next, int2 p, int2 v)
 {
     float error = 0.0f;
     int2 halfv = v / 2;
-    for (int y = -6; y <= 6; y += 4)
-        for (int x = -6; x <= 6; x += 4) {
+    for (int y = -10; y <= 10; y += 10)
+        for (int x = -10; x <= 10; x += 10) {
             int2 pos = p + (int2)(x, y);
             float2 a = read_imagef(prev, point, pos - halfv).xy;
             float2 b = read_imagef(next, point, pos + v - halfv).xy;
             float2 delta = fabs(a - b);
             error += fmax(delta.x, delta.y);
         }
-    return error * (1.0f / 16.0f);
+    return error * (1.0f / 9.0f);
 }
 
 kernel void flow(write_only image2d_t dst, uint frame,
@@ -33,20 +34,20 @@ kernel void flow(write_only image2d_t dst, uint frame,
         write_imagef(dst, tile + 2 * dx, (float4)(0.0f));
         return;
     }
-    int2 p = tile * 16 + 8;
+    int2 p = tile * FLOW_TILE + FLOW_TILE / 2;
     int2 best = 0;
     float zero = match(prev, next, p, best);
     float score = zero;
     if (zero > 0.007f) {
+        // Four probes per level cap the cost of a full-screen camera pan.
+        const int2 directions[4] = { (int2)(-1, 0), (int2)(1, 0), (int2)(0, -1), (int2)(0, 1) };
         for (int step = 16; step > 0; step /= 2) {
             int2 seed = best;
-            for (int y = -1; y <= 1; ++y)
-                for (int x = -1; x <= 1; ++x) {
-                    if (!x && !y) continue;
-                    int2 v = clamp(seed + (int2)(x, y) * step, (int2)(-31), (int2)(31));
-                    float e = match(prev, next, p, v) + 0.00055f * (float)(abs(v.x) + abs(v.y));
-                    if (e < score) { score = e; best = v; }
-                }
+            for (int i = 0; i < 4; ++i) {
+                int2 v = clamp(seed + directions[i] * step, (int2)(-31), (int2)(31));
+                float e = match(prev, next, p, v) + 0.00055f * (float)(abs(v.x) + abs(v.y));
+                if (e < score) { score = e; best = v; }
+            }
         }
     }
     // Keep disocclusions and hard cuts on one source frame.
@@ -69,7 +70,7 @@ void interpolate(write_only image2d_t dst, uint frame, uint multiplier,
     }
     float2 center = convert_float2(p) + 0.5f;
     float stride = (float)(get_image_width(vectors) / 3);
-    float2 tile = clamp(center / 16.0f, (float2)(0.5f),
+    float2 tile = clamp(center / (float)FLOW_TILE, (float2)(0.5f),
                         (float2)(stride - 0.5f, (float)get_image_height(vectors) - 0.5f));
     float2 dx = (float2)(stride, 0.0f);
     float3 m = (float3)(read_imagef(vectors, linear, tile).x,

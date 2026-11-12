@@ -4,6 +4,8 @@
     <TargetFramework Condition="'$(PortableBuild)' != 'true'">net10.0-windows</TargetFramework>
     <TargetFramework Condition="'$(PortableBuild)' == 'true'">net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>assets\player.ico</ApplicationIcon>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>CapturePlayer</AssemblyName>
@@ -11,6 +13,7 @@
     <Description>用于 VC-002Pro 的 HDMI 画面和声音预览</Description>
   </PropertyGroup>
   <ItemGroup>
+    <None Update="assets\player.ico" TargetPath="player.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Update="resources\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

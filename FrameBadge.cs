@@ -2,6 +2,22 @@ namespace CapturePlayer;
 
 internal sealed class FrameBadge : Control
 {
+    internal const int MinimumOpacity = 10, DefaultOpacity = 100;
+    int opacityPercent = DefaultOpacity;
+
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    internal int OpacityPercent
+    {
+        get => opacityPercent;
+        set
+        {
+            int percent = Math.Clamp(value, MinimumOpacity, DefaultOpacity);
+            if (opacityPercent == percent) return;
+            opacityPercent = percent;
+            if (IsHandleCreated) ApplyOpacity();
+        }
+    }
+
     internal FrameBadge()
     {
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
@@ -12,6 +28,25 @@ internal sealed class FrameBadge : Control
         ForeColor = Color.White;
         Visible = false;
     }
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var parameters = base.CreateParams;
+            // Give the overlay its own compositor surface so dragging cannot copy it into the video.
+            parameters.ExStyle |= 0x00080000; // WS_EX_LAYERED
+            return parameters;
+        }
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        ApplyOpacity();
+    }
+
+    void ApplyOpacity() => Native.SetLayeredSurfaceOpacity(Handle, (byte)((opacityPercent * 255 + 50) / 100));
 
     protected override void OnPaint(PaintEventArgs e)
     {

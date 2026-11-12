@@ -6,11 +6,30 @@ internal static class Native
 {
     [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetParent(IntPtr child, IntPtr parent);
     [DllImport("user32.dll")] static extern IntPtr GetParent(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool EnableWindow(IntPtr hwnd, bool enable);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool EnumDisplaySettings(string device, int mode, ref DisplayMode settings);
     [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] static extern int GetWindowLong(IntPtr hwnd, int index);
     [DllImport("user32.dll", EntryPoint = "SetWindowLongW")] static extern int SetWindowLong(IntPtr hwnd, int index, int value);
     [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr hwnd, IntPtr updateRect, IntPtr updateRegion, uint flags);
     [DllImport("user32.dll")] internal static extern IntPtr GetTopWindow(IntPtr parent);
+    [DllImport("user32.dll")] static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint key, byte alpha, uint flags);
+
+    internal static void SetLayeredSurfaceOpacity(IntPtr hwnd, byte alpha) =>
+        SetLayeredWindowAttributes(hwnd, 0, alpha, 0x0002); // LWA_ALPHA
+
+    [StructLayout(LayoutKind.Explicit, Size = 220)]
+    struct DisplayMode
+    {
+        [FieldOffset(68)] internal ushort Size;
+        [FieldOffset(184)] internal uint Frequency;
+    }
+
+    internal static int DisplayRefresh(string device)
+    {
+        var mode = new DisplayMode { Size = (ushort)Marshal.SizeOf<DisplayMode>() };
+        return EnumDisplaySettings(device, -1, ref mode) && mode.Frequency is >= 24 and <= 600 ? (int)mode.Frequency : 0;
+    }
 
     internal static void RaiseChild(IntPtr child) =>
         SetWindowPos(child, IntPtr.Zero, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
@@ -28,10 +47,11 @@ internal static class Native
 
     internal static bool Embed(IntPtr child, IntPtr host)
     {
-        const int WS_CHILD = 0x40000000, WS_DISABLED = 0x08000000, WS_CAPTION = 0x00C00000, WS_THICKFRAME = 0x00040000;
+        const int WS_CHILD = 0x40000000, WS_CAPTION = 0x00C00000, WS_THICKFRAME = 0x00040000;
         const int WS_POPUP = unchecked((int)0x80000000);
+        EnableWindow(child, false); // Clear keyboard focus so SDL cannot act on Escape.
         int style = GetWindowLong(child, -16);
-        SetWindowLong(child, -16, (style & ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME)) | WS_CHILD | WS_DISABLED);
+        SetWindowLong(child, -16, (style & ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME)) | WS_CHILD);
         SetParent(child, host);
         if (GetParent(child) != host) return false;
         // Recalculate the window frame without activating the child.
