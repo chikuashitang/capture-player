@@ -63,7 +63,8 @@ internal sealed class Player : Form, IMessageFilter
     readonly ComboBox mode = Choice("画质", 176);
     readonly ComboBox effect = Choice("补帧倍率", 112);
     readonly CheckBox neural = new() { Text = "DLSS 5", AutoSize = true, ForeColor = Ink };
-    readonly CheckBox showFps = new() { Text = "显示帧数", AutoSize = true, ForeColor = Ink };
+    readonly CheckBox showOverlay = new() { Text = "显示监控", AutoSize = true, ForeColor = Ink };
+    readonly ToolStripMenuItem showFps = new("帧数 (FPS)") { CheckOnClick = true };
     readonly ComboBox fpsPosition = Choice("监控显示位置", 78);
     readonly FrameBadge frameBadge = new();
     readonly Button monitorOptions = Button("监控设置", 102);
@@ -158,6 +159,7 @@ internal sealed class Player : Form, IMessageFilter
         Directory.CreateDirectory(appData);
         bool super = checkSuper;
         bool fps = checkFps;
+        bool overlayEnabled = true;
         selectedMonitors = checkSensors ? MonitorItem.All : MonitorItem.None;
         int corner = 1;
         try
@@ -170,6 +172,7 @@ internal sealed class Player : Form, IMessageFilter
                 {
                     low = settings.Low; super = settings.SuperRes; fps = settings.ShowFps; corner = settings.FpsCorner;
                     selectedMonitors = settings.Monitors & MonitorItem.All;
+                    overlayEnabled = settings.OverlayEnabled;
                     badgeOpacity.Value = Math.Clamp(settings.BadgeOpacity, badgeOpacity.Minimum, badgeOpacity.Maximum);
                 }
             }
@@ -187,11 +190,13 @@ internal sealed class Player : Form, IMessageFilter
         fpsPosition.Items.AddRange(["左上", "右上", "左下", "右下"]);
         fpsPosition.SelectedIndex = Math.Clamp(corner, 0, 3);
         showFps.Checked = fps;
-        fpsPosition.Enabled = fps || selectedMonitors != MonitorItem.None;
+        showOverlay.Checked = overlayEnabled;
+        fpsPosition.Enabled = OverlayVisible;
         monitorOptions.ContextMenuStrip = monitorMenu;
         monitorOptions.Click += (_, _) => monitorMenu.Show(monitorOptions, new Point(0, 0), ToolStripDropDownDirection.AboveLeft);
         monitorMenu.Closing += (_, e) => { if (e.CloseReason == ToolStripDropDownCloseReason.ItemClicked) e.Cancel = true; };
         AddOpacitySetting();
+        monitorMenu.Items.Add(showFps);
         AddMonitor(MonitorItem.GpuLoad, "GPU 占用");
         AddMonitor(MonitorItem.GpuTemp, "GPU 温度");
         AddMonitor(MonitorItem.Vram, "显存占用");
@@ -199,6 +204,8 @@ internal sealed class Player : Form, IMessageFilter
         monitorMenu.Items.Add(new ToolStripSeparator());
         AddMonitor(MonitorItem.CpuLoad, "CPU 占用");
         AddMonitor(MonitorItem.CpuTemp, "CPU 温度（微星小飞机）");
+        monitorMenu.Items.Add(new ToolStripSeparator());
+        monitorMenu.Items.Add("清除已选项目", null, (_, _) => ClearMonitorItems());
         mute.Text = muted ? UnmuteSound : MuteSound;
         BuildToolbar();
         preview.Margin = Padding.Empty;
@@ -214,7 +221,8 @@ internal sealed class Player : Form, IMessageFilter
         mode.SelectionChangeCommitted += (_, _) => ApplySelection();
         effect.SelectionChangeCommitted += (_, _) => ApplySelection();
         neural.CheckedChanged += async (_, _) => await ApplyNeuralSelection();
-        showFps.CheckedChanged += (_, _) => OverlayOptionsChanged();
+        showFps.Click += (_, _) => OverlayOptionsChanged();
+        showOverlay.CheckedChanged += (_, _) => OverlayOptionsChanged();
         fpsPosition.SelectedIndexChanged += (_, _) => { RefreshFrameBadge(); Save(); };
         volume.ValueChanged += (_, _) => { if (muted) { muted = false; mute.Text = MuteSound; } VolumeChanged(); };
         mute.Click += (_, _) => { muted = !muted; mute.Text = muted ? UnmuteSound : MuteSound; VolumeChanged(); Save(); };
@@ -243,14 +251,15 @@ internal sealed class Player : Form, IMessageFilter
         settings.Controls.Add(playback);
         topBar.Controls.AddRange([settings, header]);
 
-        var overlays = ToolbarRow(DockStyle.Right, new Padding(0, 0, 14, 0), showFps, monitorOptions, Caption("位置"), fpsPosition);
+        var overlays = ToolbarRow(DockStyle.Right, new Padding(0, 0, 14, 0), showOverlay, monitorOptions, Caption("位置"), fpsPosition);
         bottomBar.Controls.AddRange([status, overlays]);
         hints.SetToolTip(mode, "选择采集画质，或把 1080p 画面超分至 4K。");
         hints.SetToolTip(effect, "设置补帧倍率，受显示器刷新率和画面处理速度限制。");
         hints.SetToolTip(neural, "启用 DLSS 5 FP8 画面增强。");
         hints.SetToolTip(reconnect, "重新连接 USB 采集卡。");
         hints.SetToolTip(fullscreen, "F11 切换全屏，Esc 退出全屏。");
-        hints.SetToolTip(monitorOptions, "选择监控数据和浮层不透明度。");
+        hints.SetToolTip(monitorOptions, "勾选要显示的帧数和硬件数据，或调整浮层不透明度。");
+        hints.SetToolTip(showOverlay, "显示或隐藏整个监控浮层。关闭时保留已选项目。");
         hints.SetToolTip(fpsPosition, "设置帧数和硬件数据在画面上的位置。");
     }
 
@@ -275,15 +284,21 @@ internal sealed class Player : Form, IMessageFilter
     void AddMonitor(MonitorItem flag, string caption)
     {
         var item = new ToolStripMenuItem(caption) { CheckOnClick = true, Checked = (selectedMonitors & flag) != 0 };
-        item.CheckedChanged += (_, _) =>
+        item.Click += (_, _) =>
         {
             selectedMonitors = item.Checked ? selectedMonitors | flag : selectedMonitors & ~flag;
-            nextSampleAt = 0;
-            if (selectedMonitors == MonitorItem.None) sensors = new();
             OverlayOptionsChanged();
         };
         monitorItems.Add(flag, item);
         monitorMenu.Items.Add(item);
+    }
+
+    void ClearMonitorItems()
+    {
+        showFps.Checked = false;
+        foreach (var item in monitorItems.Values) item.Checked = false;
+        selectedMonitors = MonitorItem.None;
+        OverlayOptionsChanged();
     }
 
     void AddOpacitySetting()
@@ -304,9 +319,13 @@ internal sealed class Player : Form, IMessageFilter
         monitorMenu.Closed += (_, _) => Save();
     }
 
+    bool OverlayVisible => showOverlay.Checked && (showFps.Checked || selectedMonitors != MonitorItem.None);
+
     void OverlayOptionsChanged()
     {
-        fpsPosition.Enabled = showFps.Checked || selectedMonitors != MonitorItem.None;
+        fpsPosition.Enabled = OverlayVisible;
+        nextSampleAt = 0;
+        if (!OverlayVisible || selectedMonitors == MonitorItem.None) sensors = new();
         RefreshFrameBadge();
         Save();
     }
@@ -715,7 +734,7 @@ internal sealed class Player : Form, IMessageFilter
 
     async Task RefreshSensors()
     {
-        if (sampling || videoWindow == IntPtr.Zero || selectedMonitors == MonitorItem.None ||
+        if (sampling || !showOverlay.Checked || videoWindow == IntPtr.Zero || selectedMonitors == MonitorItem.None ||
             Environment.TickCount64 < nextSampleAt) return;
         sampling = true;
         nextSampleAt = Environment.TickCount64 + 1000;
@@ -723,7 +742,7 @@ internal sealed class Player : Form, IMessageFilter
         try
         {
             var sample = await Task.Run(() => telemetry.Read(requested));
-            if (!closing && selectedMonitors == requested)
+            if (!closing && showOverlay.Checked && selectedMonitors == requested)
             {
                 sensors = sample;
                 RefreshFrameBadge();
@@ -734,7 +753,7 @@ internal sealed class Player : Form, IMessageFilter
 
     void RefreshFrameBadge()
     {
-        if ((!showFps.Checked && selectedMonitors == MonitorItem.None) || DisplayWindow == IntPtr.Zero)
+        if (!OverlayVisible || DisplayWindow == IntPtr.Zero)
         {
             frameBadge.Visible = false;
             return;
@@ -772,22 +791,32 @@ internal sealed class Player : Form, IMessageFilter
         var placements = new List<Rectangle>();
         bool above = frameBadge.Visible && Native.GetTopWindow(preview.Handle) == frameBadge.Handle;
         var text = frameBadge.Text;
+        var monitored = checkSensors ? sensors : null;
+        var originalMonitors = selectedMonitors;
+        bool originalFps = showFps.Checked;
         for (int corner = 0; corner < 4; corner++)
         {
             fpsPosition.SelectedIndex = corner;
             placements.Add(frameBadge.Bounds);
         }
-        showFps.Checked = false;
-        bool independent = checkSensors && frameBadge.Visible && !frameBadge.Text.Contains("FPS");
-        var monitored = checkSensors ? sensors : null;
+        showOverlay.Checked = false;
+        bool hiddenBySwitch = !frameBadge.Visible;
+        showOverlay.Checked = true;
+        bool restoredBySwitch = frameBadge.Visible && selectedMonitors == originalMonitors && showFps.Checked == originalFps;
+        bool independent = false;
+        bool singleItem = false;
         if (checkSensors)
         {
-            monitorItems[MonitorItem.GpuTemp].Checked = false;
-            independent &= !frameBadge.Text.Contains("GPU 温度") && frameBadge.Text.Contains("CPU 温度");
-            foreach (var item in monitorItems.Values) item.Checked = false;
+            showFps.PerformClick();
+            independent = frameBadge.Visible && !frameBadge.Text.Contains("FPS");
+            ClearMonitorItems();
+            monitorItems[MonitorItem.GpuTemp].PerformClick();
+            singleItem = frameBadge.Visible && frameBadge.Text.StartsWith("GPU 温度", StringComparison.Ordinal) && !frameBadge.Text.Contains('\n');
         }
+        ClearMonitorItems();
         return new { AboveVideo = above, Text = text, DistinctCorners = placements.Distinct().Count(),
-            Independent = independent, Sensors = monitored, HiddenWhenOff = !frameBadge.Visible };
+            Independent = independent, Sensors = monitored, HiddenWhenOff = !frameBadge.Visible,
+            HiddenBySwitch = hiddenBySwitch, RestoredBySwitch = restoredBySwitch, SingleItem = singleItem };
     }
 
     void CheckPlayback()
@@ -1125,11 +1154,11 @@ internal sealed class Player : Form, IMessageFilter
     void Save()
     {
         if (check || synthetic) return;
-        try { File.WriteAllText(Path.Combine(appData, "settings.json"), JsonSerializer.Serialize(new Preferences(volume.Value, muted, mode.SelectedIndex != 0, mode.SelectedIndex == 2, showFps.Checked, fpsPosition.SelectedIndex, selectedMonitors, frameBadge.OpacityPercent))); }
+        try { File.WriteAllText(Path.Combine(appData, "settings.json"), JsonSerializer.Serialize(new Preferences(volume.Value, muted, mode.SelectedIndex != 0, mode.SelectedIndex == 2, showFps.Checked, fpsPosition.SelectedIndex, selectedMonitors, frameBadge.OpacityPercent, showOverlay.Checked))); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
     sealed record Preferences(int Volume, bool Muted, bool Low, bool SuperRes = false, bool ShowFps = false, int FpsCorner = 1,
-        MonitorItem Monitors = MonitorItem.None, int BadgeOpacity = FrameBadge.DefaultOpacity);
+        MonitorItem Monitors = MonitorItem.None, int BadgeOpacity = FrameBadge.DefaultOpacity, bool OverlayEnabled = true);
     sealed record RectState(FormWindowState State, Rectangle Bounds);
     sealed record RetainedPreview(Process Player, Process? Filter, CancellationTokenSource? Feed,
         Process? Audio, CancellationTokenSource? AudioFeed, IntPtr Window, double? OutputFps, bool Direct);
